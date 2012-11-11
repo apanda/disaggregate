@@ -1,33 +1,6 @@
 import random
 import sys
 
-# LRU Eviction
-# Variable for number of blocks that you can hold in local memory -- can start with 1
-
-# each machine: list of slots, where the size is the number of slots
-# and the entry is the time that the slot will be free
-
-# AS WRITTEN, WILL NEED AN INVARIANT ABOUT THE SIZE OF MEMORY: Needs to be at
-# least as large as the number of slots
-#
-#
-# have a list of the blocks that are in memory, also variable for the maximum
-# number of block slots in memory
-#
-#
-# Simple thing: `100% utilized, when machine gets slot available,  just grab
-# another task
-# Start by just having a priority queue of events, where the only type of
-# event is a task finishing (tuple of task finishing, machine). assume all
-# tasks are the same
-# length for now, so can just use a list and stick things onto the end.
-
-TASK_SLOTS_PER_CPU = 1
-DATA_SLOTS_PER_CPU = 1
-TOTAL_CPUS = 100
-
-# A task is just the data that it operates on
-
 def sample(distribution):
     """ Returns a sample from the given distribution, where the distribution
     should be specified as a list of (value, cumulative_probability) tuples,
@@ -75,10 +48,12 @@ def get_file_access_distribution(distribution_filename, num_files):
     return total_accesses, file_access_distribution
 
 class Cpu:
-    def __init__(self):
+    """ Models a CPU with a local memory cache. """
+    def __init__(self, data_slots):
         # Mapping of block ids stored in memory to the time when the block
         # was last accessed.
         self.in_memory_data = {}
+        self.data_slots = data_slots
 
     def maybe_add_data_to_memory(self, block_id, time):
         """ Adds the given block id to the memory associated with this CPU.
@@ -90,7 +65,7 @@ class Cpu:
             self.in_memory_data[block_id] = time
             return False
 
-        if len(self.in_memory_data) >= DATA_SLOTS_PER_CPU:
+        if len(self.in_memory_data) >= self.data_slots:
             # Use LRU to determine what to evict.
             oldest_block = -1
             oldest_time = float("inf")
@@ -103,38 +78,93 @@ class Cpu:
         self.in_memory_data[block_id] = time
         return True
 
-def main(argv): 
-    # If false, simulates a cache hierarchy.
-    simulate_numa = True
+def write_gnuplot_template(file):
+    file.write("set terminal pdfcairo font 'Gill Sans,20' linewidth 4 "
+               "dashed rounded dashlength 2\n")
+    file.write("set style line 80 lt 1 lc rgb \"#808080\"\n")
+    file.write("set style line 81 lt 0 # dashed\n")
+    file.write("set style line 81 lt rgb \"#808080\"  # grey\n")
+    file.write("set grid back linestyle 81\n")
+    file.write("set border 3 back linestyle 80\n")
+    file.write("set xtics nomirror\n")
+    file.write("set ytics nomirror\n")
+    file.write("set key left\n")
+
+    file.write("set style line 1 lt rgb \"#E41A1C\" lw 2 pt 1\n")
+    file.write("set style line 3 lt rgb \"#377EB8\" lw 2 pt 6\n")
+    file.write("set style line 2 lt rgb \"#4DAF4A\" lw 2 pt 2\n")
+    file.write("set style line 4 lt rgb \"#984EA3\" lw 2 pt 9\n")
+
+    file.write("set output 'results.pdf'\n")
+    file.write("set xlabel 'Data slots per CPU' offset 0,0.5\n")
+    file.write("set ylabel '% in-memory data accesses' offset 1.5\n")
+    file.write("plot ")
+
+
+def main(argv):
+    if len(argv) < 2:
+        print "Usage: simulation.py <numa or cache> <file_access_dis_filename>"
+        exit(0)
+
+    simulation_function = simulate_numa
     if argv[0] == "cache":
-        simulate_numa = False
+        simulation_function = simulate_cache
 
     file_access_distribution_filename = argv[1]
-    total_blocks = int(argv[2])
-
-    total_accesses, file_access_distribution = get_file_access_distribution(
-            file_access_distribution_filename, total_blocks)
-    print file_access_distribution
-
-    cpu_indexes = range(TOTAL_CPUS)
-    # The order in which machine slots before free (assuming 100% utilization,
-    # the number of entries here should be TASK_SLOTS_PER_CPU * TOTAL_CPUS).
-    # We don't need to store the actual time, for now, since we assume all
-    # tasks take the same amount of time; probably will eventually want to
-    # make this a priority queue.
-    cpu_slots_free = []
-    while len(cpu_slots_free) < TASK_SLOTS_PER_CPU * TOTAL_CPUS:
-        cpu_slots_free.extend(cpu_indexes)
-        random.shuffle(cpu_indexes)
 
 
+    gnuplot_file = open("results_%s.gp" % argv[0], "w")
+    write_gnuplot_template(gnuplot_file)
+
+    num_cpus_values = [50, 100, 200, 500, 1000, 2000]
+    slots_per_cpu_values = [1, 2, 5, 10]
+    total_blocks = 10000
+    task_slots_per_cpu = 1
+    for index, num_cpus in enumerate(num_cpus_values):
+        total_accesses, file_access_distribution = get_file_access_distribution(
+                file_access_distribution_filename, total_blocks)
+
+        results_filename = "simulation_results_%s_%d" % (argv[0], num_cpus)
+        results_file = open(results_filename, "w")
+        for slots_per_cpu in slots_per_cpu_values:
+            print ("Running experiment with %d cpus, %d slots per cpu, %d total "
+                   "blocks" % (num_cpus, slots_per_cpu, total_blocks))
+            cpu_indexes = range(num_cpus)
+            # The order in which machine slots before free (assuming 100%
+            # utilization, the number of entries here should be
+            # TASK_SLOTS_PER_CPU * TOTAL_CPUS). We don't need to store the
+            # actual time, for now, since we assume all tasks take the same
+            # amount of time; probably will eventually want to make this a
+            # priority queue.
+            # Right now, TASK_SLOTS_PER_CPU doesn't matter at all, nor does this
+            # ordering in cpu_slots_free.
+            cpu_slots_free = []
+            while len(cpu_slots_free) < task_slots_per_cpu * num_cpus:
+                cpu_slots_free.extend(cpu_indexes)
+                random.shuffle(cpu_indexes)
+
+            percent_in_memory = simulation_function(
+                    total_accesses, file_access_distribution, num_cpus,
+                    slots_per_cpu, cpu_slots_free)
+            print percent_in_memory
+            results_file.write("%d\t%f\t%d\n" %
+                               (slots_per_cpu, percent_in_memory, total_blocks))
+        results_file.close()
+        if index > 0:
+            gnuplot_file.write(",\\\n")
+        gnuplot_file.write("'%s' using 1:2 with lp lt %d title '%d CPUs'" %
+                           (results_filename, index, num_cpus))
+
+def simulate_numa(total_accesses, file_access_distribution, num_cpus,
+                  data_slots_per_cpu, cpu_slots_free):
+    total_blocks = len(file_access_distribution)
     data_blocks_in_memory = 0
     if simulate_numa:
         # Statically assign data blocks to each CPU.
         data_per_cpu = []
-        while len(data_per_cpu) < TOTAL_CPUS:
+        while len(data_per_cpu) < num_cpus:
             in_memory_data = set()
-            while len(in_memory_data) < DATA_SLOTS_PER_CPU:
+            while len(in_memory_data) < data_slots_per_cpu:
                 in_memory_data.add(random.randint(0, total_blocks - 1))
             data_per_cpu.append(in_memory_data)
 
@@ -146,27 +176,34 @@ def main(argv):
             data_block = sample(file_access_distribution)
             if data_block in data_per_cpu[cpu_index]:
                 data_blocks_in_memory += 1
-    else:
-        cpus = []
-        while len(cpus) < TOTAL_CPUS:
-            cpus.append(Cpu())
-        # TODO: Should prepopulate cache?
-
-        iteration = 0
-        while iteration < total_accesses:
-            iteration += 1
-            cpu_index = cpu_slots_free[iteration % len(cpu_slots_free)]
-
-            # Assign a data block to the task by sampling from the data block
-            # file access distribution.
-            data_block = sample(file_access_distribution)
-            data_added_to_memory = cpus[cpu_index].maybe_add_data_to_memory(
-                    data_block, iteration)
-            if not data_added_to_memory:
-                data_blocks_in_memory += 1
 
     percent_in_memory = data_blocks_in_memory * 1.0 / total_accesses
-    print percent_in_memory
+    return percent_in_memory
+
+
+def simulate_cache(total_accesses, file_access_distribution, num_cpus,
+                   data_slots_per_cpu, cpu_slots_free):
+    cpus = []
+    while len(cpus) < num_cpus:
+        cpus.append(Cpu(data_slots_per_cpu))
+    # TODO: Should prepopulate cache?
+
+    iteration = 0
+    data_blocks_in_memory = 0
+    while iteration < total_accesses:
+        iteration += 1
+        cpu_index = cpu_slots_free[iteration % len(cpu_slots_free)]
+
+        # Assign a data block to the task by sampling from the data block
+        # file access distribution.
+        data_block = sample(file_access_distribution)
+        data_added_to_memory = cpus[cpu_index].maybe_add_data_to_memory(
+                data_block, iteration)
+        if not data_added_to_memory:
+            data_blocks_in_memory += 1
+
+    percent_in_memory = data_blocks_in_memory * 1.0 / total_accesses
+    return percent_in_memory
 
     # TODO: Also count the *possible* total amount that count have been in memory
     # (i.e., the # of file accesses on a file that was accessed more than once),
@@ -174,4 +211,3 @@ def main(argv):
         
 if __name__ == "__main__":
     main(sys.argv[1:])
-
