@@ -49,11 +49,45 @@ def get_file_access_distribution(distribution_filename, num_files):
 
 class Cpu:
     """ Models a CPU with a local memory cache. """
-    def __init__(self, data_slots):
+    def __init__(self, data_slots, cache_policy = 'LRU'):
         # Mapping of block ids stored in memory to the time when the block
         # was last accessed.
         self.in_memory_data = {}
         self.data_slots = data_slots
+        if cache_policy == 'LRU':
+            self.evict = Cpu.lru_evict
+            self.update = Cpu.lru_update_block
+        elif cache_policy == 'LFU':
+            self.evict = Cpu.lfu_evict
+            self.update = Cpu.lfu_update_block
+    
+    def lru_evict(self):
+        # Use LRU to determine what to evict.
+        oldest_block = -1
+        oldest_time = float("inf")
+        for data, access_time in self.in_memory_data.items():
+            if access_time < oldest_time:
+                oldest_block = data
+                oldest_time = access_time
+        del self.in_memory_data[oldest_block]
+    
+    def lru_update_block(self, block, time):
+        self.in_memory_data[block] = time
+
+    def lfu_evict(self):
+        # LFU to determine what to evict
+        least_frequent = sys.maxint
+        block_to_evict = -1
+        for data, frequency in self.in_memory_data.items():
+            if frequency < least_frequent:
+                least_frequent = frequency
+                block_to_evict = data
+        del self.in_memory_data[block_to_evict]
+
+    def lfu_update_block(self, block, time):
+        if block not in self.in_memory_data:
+            self.in_memory_data[block] = 0
+        self.in_memory_data[block] += 1
 
     def maybe_add_data_to_memory(self, block_id, time):
         """ Adds the given block id to the memory associated with this CPU.
@@ -62,20 +96,13 @@ class Cpu:
         in memory.
         """
         if block_id in self.in_memory_data:
-            self.in_memory_data[block_id] = time
+            self.update(self, block_id, time)
             return False
 
         if len(self.in_memory_data) >= self.data_slots:
-            # Use LRU to determine what to evict.
-            oldest_block = -1
-            oldest_time = float("inf")
-            for data, access_time in self.in_memory_data.items():
-                if access_time < oldest_time:
-                    oldest_block = data
-                    oldest_time = access_time
+            self.evict(self)
 
-            del self.in_memory_data[oldest_block]
-        self.in_memory_data[block_id] = time
+        self.update(self, block_id, time)
         return True
 
 def write_gnuplot_template(file):
@@ -130,7 +157,7 @@ def main(argv):
             print ("Running experiment with %d cpus, %d slots per cpu, %d total "
                    "blocks" % (num_cpus, slots_per_cpu, total_blocks))
             cpu_indexes = range(num_cpus)
-            # The order in which machine slots before free (assuming 100%
+            # The order in which machine slots become free (assuming 100%
             # utilization, the number of entries here should be
             # TASK_SLOTS_PER_CPU * TOTAL_CPUS). We don't need to store the
             # actual time, for now, since we assume all tasks take the same
@@ -185,7 +212,7 @@ def simulate_cache(total_accesses, file_access_distribution, num_cpus,
                    data_slots_per_cpu, cpu_slots_free):
     cpus = []
     while len(cpus) < num_cpus:
-        cpus.append(Cpu(data_slots_per_cpu))
+        cpus.append(Cpu(data_slots_per_cpu, 'LFU'))
     # TODO: Should prepopulate cache?
 
     iteration = 0
